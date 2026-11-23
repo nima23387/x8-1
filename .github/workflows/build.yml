@@ -1,0 +1,116 @@
+
+name: Build Nima FileX APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ant unzip wget python3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$ANDROID_HOME/platforms/android-10"
+
+          wget -q https://dl.google.com/android/repository/tools_r25.2.5-linux.zip -O tools.zip
+          unzip -q tools.zip -d "$ANDROID_HOME"
+
+          wget -q https://dl.google.com/android/repository/android-2.3.3_r02.zip -O platform.zip
+          mkdir platform-temp
+          unzip -q platform.zip -d platform-temp
+
+          PLATFORM_JAR=$(find platform-temp -name android.jar -print -quit)
+          test -n "$PLATFORM_JAR"
+          cp -a "$(dirname "$PLATFORM_JAR")/." "$ANDROID_HOME/platforms/android-10/"
+
+          wget -q https://dl.google.com/android/repository/build-tools_r23.0.3-linux.zip -O build-tools.zip
+          mkdir build-tools-temp
+          unzip -q build-tools.zip -d build-tools-temp
+
+          DX_FILE=$(find build-tools-temp -name dx -print -quit)
+          test -n "$DX_FILE"
+
+          DX_DIR=$(dirname "$DX_FILE")
+          test -f "$DX_DIR/lib/dx.jar"
+
+          mkdir -p "$ANDROID_HOME/build-tools/37.0.0/lib"
+          cp "$DX_FILE" "$ANDROID_HOME/build-tools/37.0.0/dx"
+          cp "$DX_DIR/lib/dx.jar" "$ANDROID_HOME/build-tools/37.0.0/lib/dx.jar"
+          chmod +x "$ANDROID_HOME/build-tools/37.0.0/dx"
+
+      - name: Extract Nima FileX
+        shell: bash
+        run: |
+          set -e
+          python3 - <<'PY'
+          import zipfile, os
+          from pathlib import Path, PurePosixPath
+
+          archive = Path("NimaFileX-Source.zip")
+          if not archive.is_file():
+              raise SystemExit("ERROR: NimaFileX-Source.zip not found")
+
+          dest = Path("project")
+          dest.mkdir(exist_ok=True)
+
+          with zipfile.ZipFile(archive) as z:
+              for item in z.infolist():
+                  name = item.filename.replace("\\", "/").rstrip("/")
+                  if not name:
+                      continue
+                  path = PurePosixPath(name)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit("Unsafe ZIP path: " + name)
+                  target = dest.joinpath(*path.parts)
+                  if item.is_dir():
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      target.write_bytes(z.read(item))
+
+          builds = [
+              p for p in dest.rglob("build.xml")
+              if (p.parent / "AndroidManifest.xml").is_file()
+          ]
+
+          if len(builds) != 1:
+              raise SystemExit("Expected exactly one Android project")
+
+          project_dir = builds[0].parent.resolve()
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write("PROJECT_DIR=" + str(project_dir) + "\n")
+          PY
+
+      - name: Build APK
+        run: |
+          set -e
+          echo "sdk.dir=$ANDROID_HOME" > "$PROJECT_DIR/local.properties"
+          cd "$PROJECT_DIR"
+          ant debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nima-FileX-APK
+          path: project/**/bin/*-debug.apk
+          if-no-files-found: error
