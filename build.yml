@@ -4,7 +4,8 @@ name: Build Nima FileX APK
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
 
 jobs:
   build:
@@ -14,7 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: Setup Java 8
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -25,86 +26,115 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ant unzip wget python3
 
-      - name: Install Android SDK
-        shell: bash
+      - name: Download Android SDK tools
         run: |
-          set -e
+          mkdir -p "$HOME/android-sdk"
+          cd "$HOME/android-sdk"
+          wget -q https://dl.google.com/android/repository/tools_r25.2.5-linux.zip
+          unzip -q tools_r25.2.5-linux.zip
+          echo "ANDROID_HOME=$HOME/android-sdk" >> "$GITHUB_ENV"
+          echo "$HOME/android-sdk/tools" >> "$GITHUB_PATH"
+          echo "$HOME/android-sdk/platform-tools" >> "$GITHUB_PATH"
 
-          mkdir -p "$ANDROID_HOME/platforms/android-10"
+      - name: Install Android API 10
+        run: |
+          cd "$ANDROID_HOME"
+          mkdir -p platforms/android-10
+          wget -q https://dl.google.com/android/repository/android-2.3.3_r02.zip
+          unzip -q android-2.3.3_r02.zip -d /tmp/android-api
+          FOUND=$(find /tmp/android-api -type f -name android.jar | head -n 1)
+          if [ -z "$FOUND" ]; then
+            echo "android.jar not found"
+            exit 1
+          fi
+          cp -r "$(dirname "$FOUND")/"* platforms/android-10/
 
-          wget -q https://dl.google.com/android/repository/tools_r25.2.5-linux.zip -O tools.zip
-          unzip -q tools.zip -d "$ANDROID_HOME"
-
-          wget -q https://dl.google.com/android/repository/android-2.3.3_r02.zip -O platform.zip
-          mkdir platform-temp
-          unzip -q platform.zip -d platform-temp
-
-          PLATFORM_JAR=$(find platform-temp -name android.jar -print -quit)
-          test -n "$PLATFORM_JAR"
-          cp -a "$(dirname "$PLATFORM_JAR")/." "$ANDROID_HOME/platforms/android-10/"
-
-          wget -q https://dl.google.com/android/repository/build-tools_r23.0.3-linux.zip -O build-tools.zip
-          mkdir build-tools-temp
-          unzip -q build-tools.zip -d build-tools-temp
-
-          DX_FILE=$(find build-tools-temp -name dx -print -quit)
-          test -n "$DX_FILE"
-
-          DX_DIR=$(dirname "$DX_FILE")
-          test -f "$DX_DIR/lib/dx.jar"
-
+      - name: Install legacy DX
+        run: |
+          cd /tmp
+          wget -q https://dl.google.com/android/repository/build-tools_r23.0.3-linux.zip
+          unzip -q build-tools_r23.0.3-linux.zip -d /tmp/legacy-dx
           mkdir -p "$ANDROID_HOME/build-tools/37.0.0/lib"
-          cp "$DX_FILE" "$ANDROID_HOME/build-tools/37.0.0/dx"
-          cp "$DX_DIR/lib/dx.jar" "$ANDROID_HOME/build-tools/37.0.0/lib/dx.jar"
+          DX=$(find /tmp/legacy-dx -type f -name dx | head -n 1)
+          DXJAR=$(find /tmp/legacy-dx -type f -name dx.jar | head -n 1)
+          if [ -z "$DX" ] || [ -z "$DXJAR" ]; then
+            echo "Legacy DX files not found"
+            exit 1
+          fi
+          cp "$DX" "$ANDROID_HOME/build-tools/37.0.0/dx"
+          cp "$DXJAR" "$ANDROID_HOME/build-tools/37.0.0/lib/dx.jar"
           chmod +x "$ANDROID_HOME/build-tools/37.0.0/dx"
 
-      - name: Extract Nima FileX
-        shell: bash
+      - name: Extract and prepare source
         run: |
-          set -e
           python3 - <<'PY'
-          import zipfile, os
-          from pathlib import Path, PurePosixPath
+          import zipfile
+          from pathlib import Path
 
-          archive = Path("NimaFileX-Source.zip")
-          if not archive.is_file():
-              raise SystemExit("ERROR: NimaFileX-Source.zip not found")
+          archives = list(Path(".").glob("*.zip"))
+          if not archives:
+              raise SystemExit("ERROR: No source ZIP found in repository root.")
 
-          dest = Path("project")
-          dest.mkdir(exist_ok=True)
+          for archive in archives:
+              print("Checking:", archive.name)
+              with zipfile.ZipFile(archive) as z:
+                  for info in z.infolist():
+                      name = info.filename.replace("\\", "/")
+                      if name.startswith("/") or ".." in Path(name).parts:
+                          continue
+                      target = Path("project") / name
+                      if info.is_dir():
+                          target.mkdir(parents=True, exist_ok=True)
+                      else:
+                          target.parent.mkdir(parents=True, exist_ok=True)
+                          target.write_bytes(z.read(info))
 
-          with zipfile.ZipFile(archive) as z:
-              for item in z.infolist():
-                  name = item.filename.replace("\\", "/").rstrip("/")
-                  if not name:
-                      continue
-                  path = PurePosixPath(name)
-                  if path.is_absolute() or ".." in path.parts:
-                      raise SystemExit("Unsafe ZIP path: " + name)
-                  target = dest.joinpath(*path.parts)
-                  if item.is_dir():
-                      target.mkdir(parents=True, exist_ok=True)
-                  else:
-                      target.parent.mkdir(parents=True, exist_ok=True)
-                      target.write_bytes(z.read(item))
-
-          builds = [
-              p for p in dest.rglob("build.xml")
-              if (p.parent / "AndroidManifest.xml").is_file()
+          manifests = list(Path("project").rglob("AndroidManifest.xml"))
+          project_dirs = [
+              p.parent for p in manifests
+              if (p.parent / "build.xml").is_file()
           ]
 
-          if len(builds) != 1:
-              raise SystemExit("Expected exactly one Android project")
+          if len(project_dirs) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one Android project, found "
+                  + str(len(project_dirs))
+              )
 
-          project_dir = builds[0].parent.resolve()
-          with open(os.environ["GITHUB_ENV"], "a") as env:
-              env.write("PROJECT_DIR=" + str(project_dir) + "\n")
+          project_dir = project_dirs[0]
+          java_file = project_dir / "src/com/nima/filex/MainActivity.java"
+
+          if not java_file.is_file():
+              raise SystemExit("ERROR: MainActivity.java not found: " + str(java_file))
+
+          source = java_file.read_text(encoding="utf-8")
+          required_import = "import android.content.DialogInterface;"
+
+          if required_import not in source:
+              anchor = "import android.app.*;"
+              if anchor not in source:
+                  raise SystemExit("ERROR: Could not locate Android imports.")
+              source = source.replace(
+                  anchor,
+                  anchor + "\n" + required_import,
+                  1
+              )
+              java_file.write_text(source, encoding="utf-8")
+              print("Added missing DialogInterface import.")
+          else:
+              print("DialogInterface import already present.")
+
+          with open("project_dir.txt", "w") as f:
+              f.write(str(project_dir))
+
+          print("Project directory:", project_dir)
           PY
+
+          PROJECT_DIR=$(cat project_dir.txt)
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
       - name: Build APK
         run: |
-          set -e
-          echo "sdk.dir=$ANDROID_HOME" > "$PROJECT_DIR/local.properties"
           cd "$PROJECT_DIR"
           ant debug
 
