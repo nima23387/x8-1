@@ -129,10 +129,44 @@ jobs:
 
           echo "PROJECT_DIR=$(cat project_dir.txt)" >> "$GITHUB_ENV"
 
+      
       - name: Build APK
         run: |
           cd "$PROJECT_DIR"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          files = list(Path("src").rglob("*.java"))
+
+          if not files:
+              raise SystemExit("ERROR: No Java files found.")
+
+          for file in files:
+              source = file.read_text(encoding="utf-8")
+              source = re.sub(
+                  r'(?<![\w.])DialogInterface\b',
+                  'android.content.DialogInterface',
+                  source
+              )
+              file.write_text(source, encoding="utf-8")
+
+          print("=== VERIFYING FIX ===")
+
+          for file in files:
+              for line_number, line in enumerate(
+                  file.read_text(encoding="utf-8").splitlines(), 1
+              ):
+                  if "DialogInterface" in line:
+                      print(f"{file}:{line_number}: {line.strip()}")
+
+          print("=== FIX APPLIED ===")
+          PY
+
           ant debug
+
+
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
