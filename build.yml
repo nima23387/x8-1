@@ -15,7 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java 8
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ant unzip wget python3
 
-      - name: Download Android SDK tools
+      - name: Download Android SDK
         run: |
           mkdir -p "$HOME/android-sdk"
           cd "$HOME/android-sdk"
@@ -43,13 +43,10 @@ jobs:
           wget -q https://dl.google.com/android/repository/android-2.3.3_r02.zip
           unzip -q android-2.3.3_r02.zip -d /tmp/android-api
           FOUND=$(find /tmp/android-api -type f -name android.jar | head -n 1)
-          if [ -z "$FOUND" ]; then
-            echo "android.jar not found"
-            exit 1
-          fi
+          test -n "$FOUND"
           cp -r "$(dirname "$FOUND")/"* platforms/android-10/
 
-      - name: Install legacy DX
+      - name: Install DX
         run: |
           cd /tmp
           wget -q https://dl.google.com/android/repository/build-tools_r23.0.3-linux.zip
@@ -57,26 +54,25 @@ jobs:
           mkdir -p "$ANDROID_HOME/build-tools/37.0.0/lib"
           DX=$(find /tmp/legacy-dx -type f -name dx | head -n 1)
           DXJAR=$(find /tmp/legacy-dx -type f -name dx.jar | head -n 1)
-          if [ -z "$DX" ] || [ -z "$DXJAR" ]; then
-            echo "Legacy DX files not found"
-            exit 1
-          fi
+          test -n "$DX"
+          test -n "$DXJAR"
           cp "$DX" "$ANDROID_HOME/build-tools/37.0.0/dx"
           cp "$DXJAR" "$ANDROID_HOME/build-tools/37.0.0/lib/dx.jar"
           chmod +x "$ANDROID_HOME/build-tools/37.0.0/dx"
 
-      - name: Extract and prepare source
+      - name: Extract and fix source
         run: |
           python3 - <<'PY'
           import zipfile
+          import re
           from pathlib import Path
 
           archives = list(Path(".").glob("*.zip"))
           if not archives:
-              raise SystemExit("ERROR: No source ZIP found in repository root.")
+              raise SystemExit("ERROR: Source ZIP not found.")
 
           for archive in archives:
-              print("Checking:", archive.name)
+              print("Extracting:", archive.name)
               with zipfile.ZipFile(archive) as z:
                   for info in z.infolist():
                       name = info.filename.replace("\\", "/")
@@ -90,48 +86,48 @@ jobs:
                           target.write_bytes(z.read(info))
 
           manifests = list(Path("project").rglob("AndroidManifest.xml"))
-          project_dirs = [
+          projects = [
               p.parent for p in manifests
               if (p.parent / "build.xml").is_file()
           ]
 
-          if len(project_dirs) != 1:
+          if len(projects) != 1:
               raise SystemExit(
-                  "ERROR: Expected exactly one Android project, found "
-                  + str(len(project_dirs))
+                  "ERROR: Expected one Android project, found "
+                  + str(len(projects))
               )
 
-          project_dir = project_dirs[0]
-          java_file = project_dir / "src/com/nima/filex/MainActivity.java"
+          project_dir = projects[0]
+          java_files = list(project_dir.rglob("*.java"))
 
-          if not java_file.is_file():
-              raise SystemExit("ERROR: MainActivity.java not found: " + str(java_file))
+          if not java_files:
+              raise SystemExit("ERROR: No Java source files found.")
 
-          source = java_file.read_text(encoding="utf-8")
-          required_import = "import android.content.DialogInterface;"
+          for java_file in java_files:
+              source = java_file.read_text(encoding="utf-8")
 
-          if required_import not in source:
-              anchor = "import android.app.*;"
-              if anchor not in source:
-                  raise SystemExit("ERROR: Could not locate Android imports.")
-              source = source.replace(
-                  anchor,
-                  anchor + "\n" + required_import,
-                  1
+              source = re.sub(
+                  r'(?m)^\s*import\s+android\.content\.DialogInterface\s*;\s*\n?',
+                  '',
+                  source
               )
+
+              source = re.sub(
+                  r'\bDialogInterface\b',
+                  'android.content.DialogInterface',
+                  source
+              )
+
               java_file.write_text(source, encoding="utf-8")
-              print("Added missing DialogInterface import.")
-          else:
-              print("DialogInterface import already present.")
+
+          print("Fixed DialogInterface references.")
+          print("Project:", project_dir)
 
           with open("project_dir.txt", "w") as f:
               f.write(str(project_dir))
-
-          print("Project directory:", project_dir)
           PY
 
-          PROJECT_DIR=$(cat project_dir.txt)
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "PROJECT_DIR=$(cat project_dir.txt)" >> "$GITHUB_ENV"
 
       - name: Build APK
         run: |
